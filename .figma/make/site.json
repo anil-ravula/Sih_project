@@ -1,0 +1,10 @@
+{
+  "description": "This application offers a seamless user experience for analyzing geographic data through interactive maps and semantic search, ideal for Smart India Hackathon demonstrations.",
+  "robots": {
+    "index": false
+  },
+  "accessibility": {
+    "addBypassLinks": false,
+    "ignoreReducedMotion": false
+  }
+}

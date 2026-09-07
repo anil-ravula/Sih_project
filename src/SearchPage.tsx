@@ -494,6 +494,87 @@ const GUJARAT_WATER_RESULTS: SearchResult[] = [
   },
 ];
 
+const ODISHA_COASTAL_RESULTS: SearchResult[] = [
+  {
+    id: "ODI-001",
+    location: "Paradip Coastal Zone",
+    state: "Odisha",
+    change: "Coastal Erosion",
+    changeType: "vegetation-loss",
+    dateRange: "2023 → 2026",
+    area: "8.4 km²",
+    confidence: 93,
+    explanation: "Shoreline recession of 35–80m detected along a 12 km stretch north of Paradip Port. Beach width reduced by ~40% relative to the 2023 baseline. Erosion correlates with post-cyclone wave action and reduced sediment supply.",
+    coords: [20.32, 86.62],
+    sensor: "Sentinel-2 + Sentinel-1",
+  },
+  {
+    id: "ODI-002",
+    location: "Kendrapara Mangrove Coast",
+    state: "Odisha",
+    change: "Coastal Erosion",
+    changeType: "vegetation-loss",
+    dateRange: "2023 → 2026",
+    area: "5.1 km²",
+    confidence: 90,
+    explanation: "Mangrove fringe loss and shoreline retreat detected in Bhitarkanika buffer zone. NDVI decline of 0.29 in coastal fringe. Tidal creek migration also observed in northern sector.",
+    coords: [20.72, 86.9],
+    sensor: "Sentinel-2",
+  },
+  {
+    id: "ODI-003",
+    location: "Puri Beach Corridor",
+    state: "Odisha",
+    change: "Coastal Erosion",
+    changeType: "vegetation-loss",
+    dateRange: "2023 → 2026",
+    area: "3.7 km²",
+    confidence: 88,
+    explanation: "Active beach erosion south of Puri city. Dune system lost ~25m from the seaward edge. Coastal infrastructure risk elevated. SAR coherence confirms active erosion front.",
+    coords: [19.81, 85.83],
+    sensor: "Sentinel-1 + Cartosat-3",
+  },
+  {
+    id: "ODI-004",
+    location: "Chilika Lake Mouth",
+    state: "Odisha",
+    change: "Water Change",
+    changeType: "water",
+    dateRange: "2023 → 2026",
+    area: "11.3 km²",
+    confidence: 92,
+    explanation: "Chilika outlet channel migrated ~1.8 km southward. Sandbar accretion blocking tidal exchange detected via NDWI and SAR. Salinity gradient shift impacts aquaculture zones.",
+    coords: [19.72, 85.37],
+    sensor: "Sentinel-2 + Sentinel-1",
+  },
+  {
+    id: "ODI-005",
+    location: "Gopalpur-on-Sea",
+    state: "Odisha",
+    change: "Coastal Erosion",
+    changeType: "vegetation-loss",
+    dateRange: "2023 → 2026",
+    area: "2.9 km²",
+    confidence: 85,
+    explanation: "Shoreline retreat of 20–45m along a 7 km stretch. Storm surge scour during 2025 cyclone season accelerated pre-existing erosion trend detected since 2023 baseline.",
+    coords: [19.27, 84.9],
+    sensor: "Sentinel-2",
+  },
+  {
+    id: "ODI-006",
+    location: "Dhamara Estuary",
+    state: "Odisha",
+    change: "Infrastructure Change",
+    changeType: "infrastructure",
+    dateRange: "2023 → 2026",
+    area: "6.2 km²",
+    confidence: 89,
+    explanation: "Port expansion and reclamation activity detected at Dhamara LNG terminal. New jetty and road infrastructure identified via Cartosat-3 PAN imagery. Intertidal habitat loss confirmed.",
+    coords: [20.83, 86.97],
+    sensor: "Cartosat-3",
+  },
+];
+
 const FOREST_RESULTS: SearchResult[] = [
   {
     id: "FOR-001",
@@ -582,56 +663,130 @@ function searchResultToSelectedArea(result: SearchResult): SelectedArea {
 function selectResultSet(query: string): SearchResult[] {
   const q = query.toLowerCase();
 
-  // Construction / built-up queries — check before generic urban so it wins
+  // ── 1. Explicit geography wins first ─────────────────────────────────────
+  // Named places lock the result set regardless of what change-type words appear.
+
+  // Geography check must come before any change-type keyword check.
+  // "Vegetation loss around Pune" contains "vegetation" but the place name wins.
+  if (
+    q.includes("pune") ||
+    q.includes("maharashtra") ||
+    q.includes("pimpri") ||
+    q.includes("nashik") ||
+    q.includes("khed") ||
+    q.includes("haveli") ||
+    q.includes("mulshi") ||
+    q.includes("maval") ||
+    q.includes("junnar") ||
+    q.includes("bhor") ||
+    q.includes("shirur") ||
+    q.includes("indapur")
+  ) {
+    return MOCK_RESULTS;
+  }
+
+  if (q.includes("hyderabad") || q.includes("telangana") || q.includes("cyberabad") || q.includes("secunderabad")) {
+    return HYDERABAD_RESULTS;
+  }
+
+  if (
+    q.includes("odisha") ||
+    q.includes("paradip") ||
+    q.includes("puri") ||
+    q.includes("chilika") ||
+    q.includes("kendrapara") ||
+    q.includes("gopalpur") ||
+    q.includes("dhamara")
+  ) {
+    return ODISHA_COASTAL_RESULTS;
+  }
+
+  if (
+    q.includes("gujarat") ||
+    q.includes("sardar sarovar") ||
+    q.includes("gandhinagar") ||
+    q.includes("nal sarovar") ||
+    q.includes("ukai")
+  ) {
+    return GUJARAT_WATER_RESULTS;
+  }
+
+  if (
+    q.includes("chhattisgarh") ||
+    q.includes("hasdeo") ||
+    q.includes("achanakmar") ||
+    q.includes("barnawapara") ||
+    q.includes("simlipal")
+  ) {
+    return FOREST_RESULTS;
+  }
+
+  if (
+    q.includes("gift city") ||
+    q.includes("aerocity") ||
+    q.includes("whitefield") ||
+    q.includes("navi mumbai") ||
+    q.includes("neemrana") ||
+    q.includes("amaravati") ||
+    q.includes("delhi") ||
+    q.includes("bengaluru") ||
+    q.includes("karnataka") ||
+    q.includes("rajasthan") ||
+    q.includes("andhra")
+  ) {
+    return CONSTRUCTION_RESULTS;
+  }
+
+  // ── 2. Change-type keywords (no geography specified) ─────────────────────
+  // Route to the most representative dataset for each change type.
+
+  if (
+    q.includes("coastal") ||
+    q.includes("coast") ||
+    q.includes("shoreline") ||
+    q.includes("shore") ||
+    q.includes("erosion") ||
+    q.includes("mangrove")
+  ) {
+    return ODISHA_COASTAL_RESULTS;
+  }
+
   if (
     q.includes("construction") ||
     q.includes("built-up") ||
     q.includes("building") ||
     q.includes("infrastructure") ||
     q.includes("new development") ||
-    q.includes("industrial")
+    q.includes("industrial") ||
+    q.includes("urban") ||
+    q.includes("expansion")
   ) {
     return CONSTRUCTION_RESULTS;
-  }
-
-  if (q.includes("hyderabad") || (q.includes("urban") && q.includes("telangana"))) {
-    return HYDERABAD_RESULTS;
-  }
-
-  // Generic urban/expansion without a specific city → construction set is most relevant
-  if (
-    (q.includes("urban") || q.includes("expansion")) &&
-    !q.includes("pune") &&
-    !q.includes("maharashtra")
-  ) {
-    return CONSTRUCTION_RESULTS;
-  }
-
-  if (
-    q.includes("gujarat") ||
-    q.includes("sardar sarovar") ||
-    (q.includes("water") && (q.includes("reservoir") || q.includes("gujarat")))
-  ) {
-    return GUJARAT_WATER_RESULTS;
-  }
-
-  // Generic water/lake queries
-  if (q.includes("water") || q.includes("lake") || q.includes("reservoir") || q.includes("river")) {
-    return GUJARAT_WATER_RESULTS;
   }
 
   if (
     q.includes("forest") ||
-    q.includes("hasdeo") ||
-    q.includes("northeast") ||
-    q.includes("cover change") ||
     q.includes("deforestation") ||
-    q.includes("vegetation")
+    q.includes("northeast") ||
+    q.includes("cover change")
   ) {
     return FOREST_RESULTS;
   }
 
-  // Default — Maharashtra / Pune results
+  if (
+    q.includes("water") ||
+    q.includes("lake") ||
+    q.includes("reservoir") ||
+    q.includes("river")
+  ) {
+    return GUJARAT_WATER_RESULTS;
+  }
+
+  if (q.includes("vegetation") || q.includes("ndvi") || q.includes("canopy")) {
+    return MOCK_RESULTS;
+  }
+
+  // ── 3. Default ────────────────────────────────────────────────────────────
   return MOCK_RESULTS;
 }
 
@@ -1326,18 +1481,26 @@ function MapController({
 }) {
   const map = useMap();
 
-  // When the detail panel opens/closes, the map container width changes.
-  // Invalidate Leaflet's size first, then fly to the selected result.
+  // On initial mount, the flex container may not have finished layout yet.
+  // Fire two invalidateSize() passes: one quick pass and one after a full
+  // paint cycle, to catch both fast and slow layout completions.
   useEffect(() => {
-    // Small delay lets the DOM reflow complete before Leaflet measures.
+    const t1 = setTimeout(() => map.invalidateSize(), 50);
+    const t2 = setTimeout(() => map.invalidateSize(), 300);
+    return () => { clearTimeout(t1); clearTimeout(t2); };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [map]);
+
+  // When the detail panel opens/closes (layout width changes) or the
+  // selected result changes, re-invalidate and fly to the new centre.
+  useEffect(() => {
     const t = setTimeout(() => {
       map.invalidateSize();
       if (selected) {
         map.flyTo(selected.coords, 10, { duration: 0.7 });
       }
-    }, 80);
+    }, 150);
     return () => clearTimeout(t);
-  // detailOpen drives layout changes; selected drives the fly target.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [map, selected?.id, detailOpen]);
 

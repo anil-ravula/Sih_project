@@ -1,0 +1,66 @@
+@import 'leaflet/dist/leaflet.css';
+@import '@figma/astraui/styles.css';
+@import 'tailwindcss';
+@import './styles/global.css';
+
+/* Leaflet container inherits the full parent height */
+.leaflet-container {
+  width: 100%;
+  height: 100%;
+  background: #1a1a2e;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+/* ─── Print Styles for PDF Export ─────────────────────────────────────────── */
+@media print {
+  nav,
+  aside,
+  button,
+  .no-print,
+  [role="tooltip"] {
+    display: none !important;
+  }
+
+  html,
+  body,
+  #root,
+  main {
+    height: auto !important;
+    overflow: visible !important;
+    background: #ffffff !important;
+    color: #111827 !important;
+    width: 100% !important;
+    margin: 0 !important;
+    padding: 0 !important;
+  }
+
+  .bg-surface-bg {
+    background: #ffffff !important;
+    border: 1px solid #d1d5db !important;
+    box-shadow: none !important;
+    break-inside: avoid;
+    margin-bottom: 1rem;
+  }
+
+  .text-text-primary {
+    color: #111827 !important;
+  }
+
+  .text-text-secondary {
+    color: #374151 !important;
+  }
+
+  .text-text-tertiary {
+    color: #6b7280 !important;
+  }
+
+  * {
+    -webkit-print-color-adjust: exact !important;
+    print-color-adjust: exact !important;
+  }
+}

@@ -35,7 +35,7 @@ class SelectedArea(BaseModel):
     beforeDate: str
     afterDate: str
     sensor: str
-    confidence: float
+    confidence: Optional[float] = None
     affectedArea: str
     explanation: str
 
@@ -47,7 +47,7 @@ class AnalysisResponse(BaseModel):
     area: str
     changeType: AnalysisType
     sensor: str
-    confidence: float
+    confidence: Optional[float] = None
     beforeDate: str
     afterDate: str
     pageTitle: str
@@ -65,6 +65,20 @@ class AnalysisResponse(BaseModel):
     findings: List[Finding]
     statistics: List[Tuple[str, str]]
     timeline: List[TimelineItem]
+    # Real raster calculation metadata (optional for backward compatibility)
+    beforeSceneId: Optional[str] = None
+    afterSceneId: Optional[str] = None
+    indexType: Optional[str] = None
+    beforeMean: Optional[float] = None
+    afterMean: Optional[float] = None
+    meanChange: Optional[float] = None
+    changedAreaKm2: Optional[float] = None
+    changedPercentage: Optional[float] = None
+    pixelCount: Optional[int] = None
+    analysisSource: Optional[str] = "Copernicus Sentinel-2 Level-2A"
+    analysisMethod: Optional[str] = "pixel-level spectral index differencing"
+    beforeVisualUrl: Optional[str] = None
+    afterVisualUrl: Optional[str] = None
 
 
 class SearchFilters(BaseModel):

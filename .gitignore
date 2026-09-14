@@ -1,0 +1,15 @@
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+
+# Frontend
+SIH_FRONTEND/node_modules/
+SIH_FRONTEND/dist/
+
+# Environment files
+.env
+.env.*

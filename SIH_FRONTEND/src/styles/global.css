@@ -1,0 +1,94 @@
+/* ─── ISRO SatWatch · Design System Variables ────────────────────────────────
+ *
+ * Update values here to restyle the entire application.
+ * All UI components reference these variables rather than hard-coded values.
+ *
+ * The semantic tokens (--ds-color-*, --ds-font-*, etc.) are layered on top of
+ * the underlying @figma/astraui token layer so your team can customise them
+ * independently from the base kit.
+ * ─────────────────────────────────────────────────────────────────────────── */
+
+@layer design-system {
+
+  :root {
+
+    /* ── Colors ──────────────────────────────────────────────────────────── */
+
+    /* Brand */
+    --ds-color-brand-primary:        var(--brand-primary,   #5250f3);
+    --ds-color-brand-hover:          var(--brand-hover,     #4240d4);
+    --ds-color-brand-dark:           var(--brand-dark,      #3b3ac3);
+    --ds-color-brand-secondary:      var(--brand-secondary, #d1d0f9);
+    --ds-color-brand-tertiary:       var(--brand-tertiary,  #eaeaff);
+    --ds-color-brand-muted:          var(--brand-muted,     #7b7ab8);
+
+    /* Semantic status */
+    --ds-color-success:              var(--success, #47fc74);
+    --ds-color-warning:              var(--warning, #f8d33f);
+    --ds-color-danger:               var(--danger,  #cf2828);
+
+    /* Surfaces */
+    --ds-color-surface-bg:           var(--surface-bg,           #ffffff);
+    --ds-color-surface-secondary-bg: var(--surface-secondary-bg, #ffffff80);
+    --ds-color-surface-hover:        var(--surface-hover,        #f5f5f7);
+    --ds-color-surface-dark:         var(--surface-dark,         #22222c);
+    --ds-color-surface-dark-hover:   var(--surface-dark-hover,   #333341);
+    --ds-color-surface-darkest:      var(--surface-darkest,      #1e1e1e);
+
+    /* Text */
+    --ds-color-text-primary:   var(--text-primary,   #000000d9);
+    --ds-color-text-secondary: var(--text-secondary, #00000080);
+    --ds-color-text-tertiary:  var(--text-tertiary,  #0000004d);
+    --ds-color-on-brand:       var(--on-brand,       #ffffff);
+    --ds-color-on-reverse:     var(--on-reverse,     #1e1e1e);
+
+    /* Borders */
+    --ds-color-border-primary:  var(--border-primary,  #00000026);
+    --ds-color-border-secondary:var(--border-secondary,#0000000d);
+    --ds-color-border-selected: var(--border-selected, #000000cc);
+
+    /* Backgrounds */
+    --ds-color-bg-faint:  var(--bg-faint,  #00000005);
+    --ds-color-bg-subtle: var(--bg-subtle, #0000000d);
+    --ds-color-bg-hover:  var(--bg-hover,  #00000014);
+
+    /* ── Spacing ─────────────────────────────────────────────────────────── */
+
+    --ds-space-xs:  var(--space-xs,  4px);
+    --ds-space-sm:  var(--space-sm,  6px);
+    --ds-space-md:  var(--space-md,  8px);
+    --ds-space-lg:  var(--space-lg,  12px);
+    --ds-space-xl:  var(--space-xl,  16px);
+    --ds-space-2xl: var(--space-2xl, 24px);
+
+    /* ── Border Radius ───────────────────────────────────────────────────── */
+
+    --ds-radius-sm:   var(--corner-sm,   4px);
+    --ds-radius-md:   var(--corner-md,   8px);
+    --ds-radius-lg:   var(--corner-lg,   16px);
+    --ds-radius-full: var(--corner-full, 9999px);
+
+    /* ── Typography ──────────────────────────────────────────────────────── */
+
+    /* Font families — only these faces should be used for text */
+    --ds-font-sans:  "Instrument Sans", system-ui, sans-serif;
+    --ds-font-mono:  ui-monospace, "SFMono-Regular", Menlo, Monaco, Consolas, monospace;
+
+    /* Font weights */
+    --ds-font-weight-normal:   400;
+    --ds-font-weight-medium:   500;
+    --ds-font-weight-semibold: 600;
+
+    /* Type scale */
+    --ds-text-xs:        0.625rem;   /* 10px – video-title */
+    --ds-text-sm:        0.75rem;    /* 12px – label-sm    */
+    --ds-text-base:      0.875rem;   /* 14px – label       */
+    --ds-text-md:        1rem;       /* 16px – heading     */
+    --ds-text-lg:        1.25rem;    /* 20px – title       */
+
+    --ds-line-height-tight:  1.2;
+    --ds-line-height-normal: 1.4;
+    --ds-line-height-relaxed:1.6;
+  }
+
+}

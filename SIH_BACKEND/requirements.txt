@@ -3,3 +3,5 @@ uvicorn[standard]>=0.30.0
 pydantic>=2.8.0
 python-dotenv>=1.0.0
 httpx[http2]>=0.28.0
+numpy>=2.0.0
+rasterio>=1.4.0

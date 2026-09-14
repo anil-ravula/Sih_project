@@ -1,6 +1,19 @@
 import re
-import httpx
+import json
+import urllib.request
+import urllib.parse
 from typing import List, Optional, Tuple, Dict
+import io
+import base64
+import concurrent.futures
+from PIL import Image
+import httpx
+import numpy as np
+import rasterio
+from rasterio.windows import from_bounds
+from rasterio.warp import transform_bounds
+from pydantic import BaseModel
+
 from schemas import (
     SelectedArea,
     AnalysisResponse,
@@ -705,6 +718,14 @@ INDIAN_GEO_LOCATIONS: Dict[str, Dict] = {
     "gangtok": {"state": "Sikkim", "coords": (27.34, 88.61)},
     "itanagar": {"state": "Arunachal Pradesh", "coords": (27.08, 93.61)},
     "port blair": {"state": "Andaman & Nicobar", "coords": (11.62, 92.73)},
+    "whitefield": {"state": "Karnataka", "coords": (12.97, 77.75)},
+    "gift city": {"state": "Gujarat", "coords": (23.16, 72.68)},
+    "aerocity": {"state": "Delhi", "coords": (28.56, 77.11)},
+    "neemrana": {"state": "Rajasthan", "coords": (27.98, 76.37)},
+    "amaravati": {"state": "Andhra Pradesh", "coords": (16.51, 80.52)},
+    "sardar sarovar": {"state": "Gujarat", "coords": (21.83, 73.75)},
+    "cyberabad": {"state": "Telangana", "coords": (17.44, 78.38)},
+    "hasdeo": {"state": "Chhattisgarh", "coords": (22.60, 82.30)},
 }
 
 
@@ -870,30 +891,95 @@ def generate_dynamic_results_for_location(
     ]
 
 
+def is_explicit_curated_demo_query(query: str) -> bool:
+    """Checks if the query explicitly refers to one of the repository's curated demo showcase areas."""
+    q = query.lower()
+    curated_keywords = [
+        # Pune
+        "pune", "pimpri", "nashik", "khed", "haveli", "mulshi", "maval", "junnar", "bhor", "shirur", "indapur",
+        # Hyderabad / Cyberabad
+        "cyberabad", "hyderabad", "secunderabad", "shamshabad", "it corridor", "hitech",
+        # Sardar Sarovar / Gujarat
+        "sardar sarovar", "nal sarovar", "ukai",
+        # Hasdeo
+        "hasdeo", "achanakmar", "barnawapara",
+        # Odisha
+        "paradip", "chilika", "kendrapara", "gopalpur", "dhamara",
+        # Nagaland
+        "nagaland", "kohima", "dimapur",
+        # Construction showcase
+        "gift city", "aerocity", "neemrana", "amaravati",
+    ]
+    for kw in curated_keywords:
+        if re.search(r"\b" + re.escape(kw) + r"\b", q):
+            return True
+    return False
+
+
+def is_pure_thematic_query(query: str) -> bool:
+    """
+    Returns True ONLY when a query contains recognized change-type/thematic keywords
+    and does NOT contain an unrecognized geographic location name.
+    """
+    q = query.lower().strip()
+    thematic_words = {
+        "coastal", "coast", "shoreline", "shore", "erosion", "mangrove",
+        "forest", "deforestation", "canopy",
+        "water", "lake", "reservoir", "river", "flood",
+        "construction", "built-up", "infrastructure", "urban", "expansion",
+        "vegetation", "ndvi", "greening",
+    }
+    tokens = set(re.findall(r"\b[a-zA-Z]{3,}\b", q))
+    common_stops = {
+        "change", "detection", "satellite", "data", "imagery", "analysis",
+        "monitoring", "recent", "view", "find", "all", "the", "in", "and",
+        "loss", "gain", "type", "events", "near", "around", "over", "zones",
+    }
+    non_thematic = tokens - thematic_words - common_stops
+    return bool(tokens & thematic_words) and len(non_thematic) == 0
+
+
 def select_result_set(query: str) -> List[SearchResult]:
     q = query.lower()
 
     # 1. Curated specific catalogs (Preserve all existing catalogued locations)
-    if any(k in q for k in ["pune", "pimpri", "nashik", "khed", "haveli", "mulshi", "maval", "junnar", "bhor", "shirur", "indapur"]):
+    if any(re.search(r"\b" + re.escape(k) + r"\b", q) for k in ["pune", "pimpri", "nashik", "khed", "haveli", "mulshi", "maval", "junnar", "bhor", "shirur", "indapur"]):
         return list(PUNE_RESULTS)
 
-    if any(k in q for k in ["hyderabad", "telangana", "cyberabad", "secunderabad", "shamshabad"]):
+    if any(re.search(r"\b" + re.escape(k) + r"\b", q) for k in ["cyberabad", "hyderabad", "telangana", "secunderabad", "shamshabad", "it corridor", "hitech"]):
         return list(HYDERABAD_RESULTS)
 
-    if any(k in q for k in ["odisha", "paradip", "puri", "chilika", "kendrapara", "gopalpur", "dhamara"]):
+    if any(re.search(r"\b" + re.escape(k) + r"\b", q) for k in ["odisha", "paradip", "puri", "chilika", "kendrapara", "gopalpur", "dhamara"]):
         return list(ODISHA_COASTAL_RESULTS)
 
-    if any(k in q for k in ["gujarat", "sardar sarovar", "gandhinagar", "nal sarovar", "ukai"]):
+    if any(re.search(r"\b" + re.escape(k) + r"\b", q) for k in ["sardar sarovar", "gujarat", "gandhinagar", "nal sarovar", "ukai"]):
         return list(GUJARAT_WATER_RESULTS)
 
-    if any(k in q for k in ["chhattisgarh", "hasdeo", "achanakmar", "barnawapara", "simlipal"]):
+    if any(re.search(r"\b" + re.escape(k) + r"\b", q) for k in ["hasdeo", "chhattisgarh", "achanakmar", "barnawapara", "simlipal"]):
         return list(FOREST_RESULTS)
 
-    if any(k in q for k in ["gift city", "aerocity", "whitefield", "neemrana", "amaravati"]):
-        return list(CONSTRUCTION_RESULTS)
+    # Specific unbundled construction locations (Do NOT lump Whitefield into Gujarat):
+    if re.search(r"\bwhitefield\b", q):
+        matches = [r for r in CONSTRUCTION_RESULTS if "whitefield" in r.location.lower()]
+        return matches if matches else list(CONSTRUCTION_RESULTS)
+
+    if re.search(r"\bgift city\b", q):
+        matches = [r for r in CONSTRUCTION_RESULTS if "gift city" in r.location.lower()]
+        return matches if matches else list(CONSTRUCTION_RESULTS)
+
+    if re.search(r"\baerocity\b", q):
+        matches = [r for r in CONSTRUCTION_RESULTS if "aerocity" in r.location.lower()]
+        return matches if matches else list(CONSTRUCTION_RESULTS)
+
+    if re.search(r"\bneemrana\b", q):
+        matches = [r for r in CONSTRUCTION_RESULTS if "neemrana" in r.location.lower()]
+        return matches if matches else list(CONSTRUCTION_RESULTS)
+
+    if re.search(r"\bamaravati\b", q):
+        matches = [r for r in CONSTRUCTION_RESULTS if "amaravati" in r.location.lower()]
+        return matches if matches else list(CONSTRUCTION_RESULTS)
 
     # 2. Match against Comprehensive Indian Geographic Directory
-    # Sort keys by length descending to match multi-word entries first (e.g. "navi mumbai", "tamil nadu")
     sorted_geo_keys = sorted(INDIAN_GEO_LOCATIONS.keys(), key=len, reverse=True)
     for key in sorted_geo_keys:
         pattern = r"\b" + re.escape(key) + r"\b"
@@ -902,38 +988,380 @@ def select_result_set(query: str) -> List[SearchResult]:
             loc_title = key.title()
             return generate_dynamic_results_for_location(loc_title, info["state"], info["coords"], query)
 
-    # 3. Check for "in/near/around/at <Place>" regex pattern against catalog
-    place_match = re.search(r"\b(?:in|near|around|at)\s+([a-zA-Z]+)\b", q)
-    if place_match:
-        raw_place = place_match.group(1).lower()
-        skip_words = {"the", "a", "an", "all", "india", "satellite", "recent", "new", "this", "zone", "corridor"}
-        if raw_place not in skip_words and len(raw_place) > 2 and raw_place in INDIAN_GEO_LOCATIONS:
-            info = INDIAN_GEO_LOCATIONS[raw_place]
-            return generate_dynamic_results_for_location(raw_place.title(), info["state"], info["coords"], query)
+    # 3. Pure change-type keywords (ONLY when no specific location is requested)
+    if is_pure_thematic_query(q):
+        if any(re.search(r"\b" + re.escape(k) + r"\b", q) for k in ["coastal", "coast", "shoreline", "shore", "erosion", "mangrove"]):
+            return list(ODISHA_COASTAL_RESULTS)
 
-    # 4. Pure change-type keywords (when no specific location is requested)
-    if any(k in q for k in ["coastal", "coast", "shoreline", "shore", "erosion", "mangrove"]):
-        return list(ODISHA_COASTAL_RESULTS)
+        if any(re.search(r"\b" + re.escape(k) + r"\b", q) for k in ["construction", "built-up", "building", "infrastructure", "new development", "industrial", "urban", "expansion"]):
+            return list(CONSTRUCTION_RESULTS)
 
-    if any(k in q for k in ["construction", "built-up", "building", "infrastructure", "new development", "industrial", "urban", "expansion"]):
-        return list(CONSTRUCTION_RESULTS)
+        if any(re.search(r"\b" + re.escape(k) + r"\b", q) for k in ["forest", "deforestation", "northeast", "cover change"]):
+            return list(FOREST_RESULTS)
 
-    if any(k in q for k in ["forest", "deforestation", "northeast", "cover change"]):
-        return list(FOREST_RESULTS)
+        if any(re.search(r"\b" + re.escape(k) + r"\b", q) for k in ["water", "lake", "reservoir", "river"]):
+            return list(GUJARAT_WATER_RESULTS)
 
-    if any(k in q for k in ["water", "lake", "reservoir", "river"]):
-        return list(GUJARAT_WATER_RESULTS)
+        if any(re.search(r"\b" + re.escape(k) + r"\b", q) for k in ["vegetation", "ndvi", "canopy", "loss"]):
+            return list(PUNE_RESULTS)
 
-    if any(k in q for k in ["vegetation", "ndvi", "canopy", "loss"]):
-        return list(PUNE_RESULTS)
-
-    # 5. Unknown location / query not in catalog -> graceful no results (do NOT fall back to Pune)
+    # 4. Unknown location / query not in catalog -> graceful no results (never fall back to Pune or Odisha)
     return []
+
+
+# ─── Multi-Tier General Geocoding Architecture ──────────────────────────────
+
+class GeocodedLocation(BaseModel):
+    name: str
+    display_name: str
+    state: str
+    district: Optional[str] = None
+    country: str = "India"
+    latitude: float
+    longitude: float
+    bbox: Tuple[float, float, float, float]  # (min_lon, min_lat, max_lon, max_lat)
+    source: str
+
+
+_GEOCODE_CACHE: Dict[str, Optional[GeocodedLocation]] = {}
+
+
+def _query_open_meteo(term: str) -> Optional[GeocodedLocation]:
+    """Query Open-Meteo Geocoding API, prioritizing Indian locations and administrative details."""
+    try:
+        enc = urllib.parse.quote(term.strip())
+        url = f"https://geocoding-api.open-meteo.com/v1/search?name={enc}&count=10&language=en&format=json"
+        req = urllib.request.Request(url, headers={"User-Agent": "SIH-SatWatch/1.0"})
+        with urllib.request.urlopen(req, timeout=3.5) as res:
+            data = json.loads(res.read().decode())
+            results = data.get("results", [])
+            in_res = [r for r in results if r.get("country_code") == "IN" or r.get("country") == "India"]
+            if in_res:
+                r = in_res[0]
+                lat = float(r.get("latitude"))
+                lon = float(r.get("longitude"))
+                bbox = (round(lon - 0.15, 4), round(lat - 0.15, 4), round(lon + 0.15, 4), round(lat + 0.15, 4))
+                state = r.get("admin1") or "India"
+                district = r.get("admin2")
+                name = r.get("name") or term.title()
+                return GeocodedLocation(
+                    name=name,
+                    display_name=f"{name}, {state}",
+                    state=state,
+                    district=district,
+                    country="India",
+                    latitude=lat,
+                    longitude=lon,
+                    bbox=bbox,
+                    source="open-meteo",
+                )
+    except Exception:
+        pass
+    return None
+
+
+def _query_photon(term: str) -> Optional[GeocodedLocation]:
+    """Query Komoot Photon API (OSM-based), prioritizing Indian locations and geographic features."""
+    try:
+        enc = urllib.parse.quote(term.strip())
+        url = f"https://photon.komoot.io/api/?q={enc}&limit=5"
+        req = urllib.request.Request(url, headers={"User-Agent": "SIH-SatWatch/1.0"})
+        with urllib.request.urlopen(req, timeout=3.5) as res:
+            data = json.loads(res.read().decode())
+            feats = data.get("features", [])
+            in_feats = [
+                f for f in feats
+                if f.get("properties", {}).get("countrycode") == "IN" or f.get("properties", {}).get("country") == "India"
+            ]
+            if in_feats:
+                f = in_feats[0]
+                props = f.get("properties", {})
+                coords = f.get("geometry", {}).get("coordinates", [0, 0])
+                lon = float(coords[0])
+                lat = float(coords[1])
+                name = props.get("name") or term.title()
+                state = props.get("state")
+                if not state and name.lower() in (
+                    "nagaland", "goa", "assam", "sikkim", "manipur", "mizoram", "tripura", "meghalaya", "kerala", "gujarat"
+                ):
+                    state = name.title()
+                district = props.get("county") or props.get("district")
+
+                extent = props.get("extent")
+                if extent and len(extent) == 4:
+                    min_lon, max_lat, max_lon, min_lat = extent
+                    if abs(max_lon - min_lon) <= 1.0 and abs(max_lat - min_lat) <= 1.0:
+                        bbox = (round(min_lon, 4), round(min_lat, 4), round(max_lon, 4), round(max_lat, 4))
+                    else:
+                        bbox = (round(lon - 0.15, 4), round(lat - 0.15, 4), round(lon + 0.15, 4), round(lat + 0.15, 4))
+                else:
+                    bbox = (round(lon - 0.15, 4), round(lat - 0.15, 4), round(lon + 0.15, 4), round(lat + 0.15, 4))
+
+                return GeocodedLocation(
+                    name=name,
+                    display_name=f"{name}, {state or 'India'}",
+                    state=state or "India",
+                    district=district,
+                    country="India",
+                    latitude=lat,
+                    longitude=lon,
+                    bbox=bbox,
+                    source="photon",
+                )
+    except Exception:
+        pass
+    return None
+
+
+INTENT_WORDS_PATTERN = re.compile(
+    r"\b(vegetation\s+(?:loss|gain|change|decline|stress|growth|recovery|expansion|index)"
+    r"|forest\s+(?:loss|gain|change|cover|clearing|decline|destruction)"
+    r"|canopy\s+(?:loss|gain|change|cover|decline)"
+    r"|water\s+body\s+(?:change|loss|gain|expansion|recession|shrinkage)?"
+    r"|water\s+(?:change|loss|gain|level|surface|recession|body|bodies|expansion|shrinkage)"
+    r"|urban\s+(?:expansion|growth|change|development|sprawl)"
+    r"|built[\s-]up\s+(?:area|growth|expansion|change)?"
+    r"|infrastructure\s+(?:development|expansion|growth|change)"
+    r"|land\s+cover\s+(?:change|loss|gain)?"
+    r"|land\s+use\s+(?:change|conversion)?"
+    r"|change\s+detection"
+    r"|coastal\s+(?:erosion|change)"
+    r"|shoreline\s+(?:change|erosion|shift)"
+    r"|satellite\s+(?:imagery|images|data|observations|observation|scans)"
+    r"|sentinel[\s-]?2?\s+(?:imagery|images|data|observations|observation|scans)?"
+    r"|deforestation|afforestation|greening|flooding|flood|drought"
+    r"|vegetation|forest|canopy|reservoir|lake|river|water"
+    r"|imagery|images|image|observations|observation|data"
+    r"|change|changes|detection|analysis|monitoring|scans|scan"
+    r"|show|find|view|display|explore|inspect|get|search"
+    r"|recent|latest|historical|multi-temporal|temporal"
+    r"|events|event|zones|zone|area|areas|region|regions|district|districts"
+    r")\b",
+    re.I,
+)
+
+PREPOSITIONS_PATTERN = re.compile(
+    r"\b(?:around|near|nearby|in|at|over|across|for|of|within|surrounding|covering|along)\s+(.+)$",
+    re.I,
+)
+
+
+def _clean_candidate_term(term: str) -> str:
+    t = re.sub(r"^[,\s.:;]+|[,\s.:;]+$", "", term)
+    t = re.sub(r"\s+", " ", t)
+    return t.strip()
+
+
+def extract_location_candidates(query: str, state_filter: str = "") -> List[str]:
+    """
+    Extracts geographic place candidates generically from natural-language queries
+    without hardcoding city names.
+    """
+    candidates: List[str] = []
+    seen = set()
+
+    def add_candidate(cand: str):
+        c = _clean_candidate_term(cand)
+        if c and len(c) >= 2 and c.lower() not in seen:
+            seen.add(c.lower())
+            candidates.append(c)
+
+    # 1. Text following spatial prepositions (e.g., "around Pune" -> "Pune")
+    prep_match = PREPOSITIONS_PATTERN.search(query)
+    if prep_match:
+        after_prep = prep_match.group(1).strip()
+        cleaned_prep = INTENT_WORDS_PATTERN.sub("", after_prep)
+        add_candidate(cleaned_prep)
+        add_candidate(after_prep)
+
+    # 2. Entire query with intent and action phrases stripped
+    intent_stripped = INTENT_WORDS_PATTERN.sub("", query)
+    prep_stripped = re.sub(
+        r"\b(around|near|nearby|in|at|over|across|for|of|within|surrounding|covering|along)\b",
+        "",
+        intent_stripped,
+        flags=re.I,
+    )
+    add_candidate(prep_stripped)
+
+    # 3. Strip landscape qualifiers (e.g., "reservoir", "hills", "valley")
+    landscape_stripped = re.sub(
+        r"\b(forest|jungle|reservoir|dam|valley|hills|range|region|district|river|corridor)\b",
+        "",
+        prep_stripped,
+        flags=re.I,
+    )
+    add_candidate(landscape_stripped)
+
+    # 4. State filter qualified variant if state filter exists
+    if state_filter:
+        for c in list(candidates):
+            if state_filter.lower() not in c.lower():
+                candidates.insert(0, f"{c}, {state_filter}")
+                break
+
+    # 5. Raw query fallback if nothing else was extracted
+    if not candidates:
+        add_candidate(query)
+
+    return candidates
+
+
+def geocode_location(
+    query: str,
+    filters: Optional[SearchFilters] = None,
+) -> Optional[GeocodedLocation]:
+    """
+    Multi-tier geographic geocoding engine for arbitrary locations across India:
+    1. Check in-memory cache (_GEOCODE_CACHE)
+    2. Check curated showcase locations (Sardar Sarovar, Hasdeo, Cyberabad, Nagaland)
+    3. Query Open-Meteo & Photon geocoders with India preference
+    4. Fallback to comprehensive national gazetteer (INDIAN_GEO_LOCATIONS)
+    5. Fallback to filter state
+    """
+    q_raw = query.strip()
+    if not q_raw:
+        return None
+
+    # Pure thematic queries (e.g. "vegetation loss", "coastal erosion") contain no location
+    if is_pure_thematic_query(q_raw):
+        return None
+
+    state_filter = filters.state.strip() if filters and filters.state else ""
+    cache_key = f"{q_raw.lower()}|{state_filter.lower()}"
+    if cache_key in _GEOCODE_CACHE:
+        return _GEOCODE_CACHE[cache_key]
+
+    q_lower = q_raw.lower()
+
+    # 1. Curated showcase exact matches (preserve verified showcase coordinates)
+    if "sardar sarovar" in q_lower:
+        loc = GeocodedLocation(
+            name="Sardar Sarovar Reservoir",
+            display_name="Sardar Sarovar Reservoir, Gujarat",
+            state="Gujarat",
+            district="Narmada",
+            country="India",
+            latitude=21.83,
+            longitude=73.75,
+            bbox=(73.65, 21.75, 73.95, 21.95),
+            source="showcase",
+        )
+        _GEOCODE_CACHE[cache_key] = loc
+        return loc
+
+    if any(re.search(r"\b" + re.escape(k) + r"\b", q_lower) for k in ["cyberabad", "it corridor", "hitech city", "hitech"]):
+        loc = GeocodedLocation(
+            name="Cyberabad / Hyderabad IT Corridor",
+            display_name="Cyberabad / Hyderabad IT Corridor, Telangana",
+            state="Telangana",
+            district="Hyderabad",
+            country="India",
+            latitude=17.44,
+            longitude=78.38,
+            bbox=(78.25, 17.30, 78.55, 17.55),
+            source="showcase",
+        )
+        _GEOCODE_CACHE[cache_key] = loc
+        return loc
+
+    if re.search(r"\bhasdeo\b", q_lower):
+        loc = GeocodedLocation(
+            name="Hasdeo Forest",
+            display_name="Hasdeo Forest, Chhattisgarh",
+            state="Chhattisgarh",
+            district="Korba",
+            country="India",
+            latitude=22.60,
+            longitude=82.30,
+            bbox=(82.15, 22.45, 82.55, 22.85),
+            source="showcase",
+        )
+        _GEOCODE_CACHE[cache_key] = loc
+        return loc
+
+    if re.search(r"\bnagaland\b", q_lower):
+        loc = GeocodedLocation(
+            name="Nagaland Forest Region",
+            display_name="Nagaland Forest Region, Nagaland",
+            state="Nagaland",
+            district="Kohima",
+            country="India",
+            latitude=25.67,
+            longitude=94.11,
+            bbox=(93.85, 25.45, 94.35, 25.95),
+            source="showcase",
+        )
+        _GEOCODE_CACHE[cache_key] = loc
+        return loc
+
+    # 2. Extract clean search candidate terms generically
+    candidates = extract_location_candidates(q_raw, state_filter)
+
+    # 3. Multi-tier general geocoding
+    for term in candidates:
+        geo = _query_open_meteo(term)
+        if geo:
+            _GEOCODE_CACHE[cache_key] = geo
+            return geo
+
+        geo = _query_photon(term)
+        if geo:
+            _GEOCODE_CACHE[cache_key] = geo
+            return geo
+
+    # 4. National gazetteer matching (INDIAN_GEO_LOCATIONS)
+    sorted_geo_keys = sorted(INDIAN_GEO_LOCATIONS.keys(), key=len, reverse=True)
+    search_targets = candidates + [q_lower]
+    for target in search_targets:
+        t_lower = target.lower()
+        for key in sorted_geo_keys:
+            if re.search(r"\b" + re.escape(key) + r"\b", t_lower):
+                info = INDIAN_GEO_LOCATIONS[key]
+                lat, lon = info["coords"]
+                bbox = (round(lon - 0.15, 4), round(lat - 0.15, 4), round(lon + 0.15, 4), round(lat + 0.15, 4))
+                loc = GeocodedLocation(
+                    name=key.title(),
+                    display_name=f"{key.title()}, {info['state']}",
+                    state=info["state"],
+                    district=None,
+                    country="India",
+                    latitude=lat,
+                    longitude=lon,
+                    bbox=bbox,
+                    source="gazetteer",
+                )
+                _GEOCODE_CACHE[cache_key] = loc
+                return loc
+
+    # 5. Filter-based state matching
+    if state_filter:
+        st_clean = state_filter.lower()
+        for key, info in INDIAN_GEO_LOCATIONS.items():
+            if key == st_clean or info["state"].lower() == st_clean:
+                lat, lon = info["coords"]
+                bbox = (round(lon - 0.25, 4), round(lat - 0.25, 4), round(lon + 0.25, 4), round(lat + 0.25, 4))
+                loc = GeocodedLocation(
+                    name=info["state"],
+                    display_name=f"{info['state']}, India",
+                    state=info["state"],
+                    district=None,
+                    country="India",
+                    latitude=lat,
+                    longitude=lon,
+                    bbox=bbox,
+                    source="state_filter",
+                )
+                _GEOCODE_CACHE[cache_key] = loc
+                return loc
+
+    _GEOCODE_CACHE[cache_key] = None
+    return None
 
 
 # ─── Copernicus Data Space STAC Integration (Sentinel-2 Level-2A) ───────────
 
-COPERNICUS_STAC_URL = "https://stac.dataspace.copernicus.eu/v1/search"
+COPERNICUS_STAC_URL = "https://stac.dataspace.copernicus.eu/v1/"
 
 
 def resolve_location_and_aoi(
@@ -942,59 +1370,11 @@ def resolve_location_and_aoi(
 ) -> Optional[Tuple[str, str, Tuple[float, float, float, float]]]:
     """
     Resolves location name, state, and geographic bounding box [min_lon, min_lat, max_lon, max_lat]
-    from natural language query or structured search filters.
+    using the multi-tier general geocoding engine.
     """
-    q = query.lower()
-
-    # 1. Curated specific catalogs
-    if any(k in q for k in ["pune", "pimpri", "nashik", "khed", "haveli", "mulshi", "maval", "junnar", "bhor", "shirur", "indapur"]):
-        return ("Pune Metropolitan Region", "Maharashtra", (73.70, 18.35, 74.05, 18.85))
-
-    if any(k in q for k in ["hyderabad", "telangana", "cyberabad", "secunderabad", "shamshabad"]):
-        return ("Hyderabad Urban Hub", "Telangana", (78.20, 17.20, 78.65, 17.60))
-
-    if any(k in q for k in ["odisha", "paradip", "puri", "chilika", "kendrapara", "gopalpur", "dhamara"]):
-        return ("Odisha Coastal Belt", "Odisha", (85.70, 19.60, 86.80, 20.50))
-
-    if any(k in q for k in ["gujarat", "sardar sarovar", "gandhinagar", "nal sarovar", "ukai"]):
-        return ("Gujarat Hydrological Basin", "Gujarat", (71.10, 21.80, 73.00, 23.20))
-
-    if any(k in q for k in ["chhattisgarh", "hasdeo", "achanakmar", "barnawapara", "simlipal"]):
-        return ("Hasdeo Arand Forest", "Chhattisgarh", (81.50, 21.00, 83.20, 22.80))
-
-    if any(k in q for k in ["gift city", "aerocity", "whitefield", "neemrana", "amaravati"]):
-        return ("GIFT City / Whitefield Corridor", "Gujarat", (72.60, 23.10, 72.75, 23.25))
-
-    # 2. Match against Comprehensive Indian Geographic Directory
-    sorted_geo_keys = sorted(INDIAN_GEO_LOCATIONS.keys(), key=len, reverse=True)
-    for key in sorted_geo_keys:
-        pattern = r"\b" + re.escape(key) + r"\b"
-        if re.search(pattern, q):
-            info = INDIAN_GEO_LOCATIONS[key]
-            lat, lon = info["coords"]
-            bbox = (round(lon - 0.20, 4), round(lat - 0.20, 4), round(lon + 0.20, 4), round(lat + 0.20, 4))
-            return (key.title(), info["state"], bbox)
-
-    # 3. Check for "in/near/around/at <Place>" regex pattern against catalog
-    place_match = re.search(r"\b(?:in|near|around|at)\s+([a-zA-Z]+)\b", q)
-    if place_match:
-        raw_place = place_match.group(1).lower()
-        skip_words = {"the", "a", "an", "all", "india", "satellite", "recent", "new", "this", "zone", "corridor"}
-        if raw_place not in skip_words and len(raw_place) > 2 and raw_place in INDIAN_GEO_LOCATIONS:
-            info = INDIAN_GEO_LOCATIONS[raw_place]
-            lat, lon = info["coords"]
-            bbox = (round(lon - 0.20, 4), round(lat - 0.20, 4), round(lon + 0.20, 4), round(lat + 0.20, 4))
-            return (raw_place.title(), info["state"], bbox)
-
-    # 4. Check if filter provides state
-    if filters and filters.state and filters.state.strip():
-        st_key = filters.state.strip().lower()
-        for key, info in INDIAN_GEO_LOCATIONS.items():
-            if key == st_key or info["state"].lower() == st_key:
-                lat, lon = info["coords"]
-                bbox = (round(lon - 0.25, 4), round(lat - 0.25, 4), round(lon + 0.25, 4), round(lat + 0.25, 4))
-                return (info["state"], info["state"], bbox)
-
+    geo = geocode_location(query, filters)
+    if geo:
+        return (geo.name, geo.state, geo.bbox)
     return None
 
 
@@ -1041,7 +1421,8 @@ def query_copernicus_stac(
 
     try:
         with httpx.Client(http2=True, timeout=12.0) as client:
-            resp = client.post(COPERNICUS_STAC_URL, headers=headers, json=payload)
+            search_url = f"{COPERNICUS_STAC_URL.rstrip('/')}/search" if not COPERNICUS_STAC_URL.rstrip("/").endswith("/search") else COPERNICUS_STAC_URL
+            resp = client.post(search_url, headers=headers, json=payload)
             if resp.status_code != 200:
                 print(f"[STAC Warning] Copernicus STAC returned HTTP {resp.status_code}: {resp.text[:150]}")
                 return []
@@ -1135,322 +1516,524 @@ def query_copernicus_stac(
     return results
 
 
+def _apply_structured_filters(results: List[SearchResult], filters: Optional[SearchFilters]) -> List[SearchResult]:
+    """Applies structured change-type, confidence, state, and sensor filters to result sets."""
+    if not filters:
+        return results
+    res = list(results)
+    if filters.changeTypes:
+        res = [r for r in res if r.changeType in filters.changeTypes]
+    if filters.minConfidence and filters.minConfidence > 0:
+        res = [r for r in res if r.confidence >= filters.minConfidence]
+    if filters.state and filters.state.strip():
+        st = filters.state.strip().lower()
+        res = [r for r in res if st in r.state.lower()]
+    if filters.dataSource and filters.dataSource != "all":
+        ds_map = {
+            "sentinel-2": "Sentinel",
+            "landsat": "Landsat",
+            "cartosat": "Cartosat",
+        }
+        target = ds_map.get(filters.dataSource.lower(), filters.dataSource)
+        res = [r for r in res if target.lower() in r.sensor.lower()]
+    return res
+
+
 def search_observations(query: str, filters: Optional[SearchFilters] = None) -> List[SearchResult]:
+    """
+    Primary semantic search and observation retrieval handler:
+    1. Geocodes user query to arbitrary valid geographic locations (lat/lon, state, district, AOI).
+    2. Queries real Copernicus Sentinel-2 STAC API for observations in that specific AOI.
+    3. Prevents cross-state mock pollution: arbitrary locations with no observations return empty []
+       rather than silent substitution of unrelated mock data.
+    4. Preserves curated showcase presets (Pune, Sardar Sarovar, Hasdeo, Cyberabad) when requested.
+    """
     query_clean = query.strip()
     
     # Check data source compatibility
     ds = (filters.dataSource or "all").lower() if filters else "all"
     is_sentinel_compatible = ds in ("all", "sentinel-2", "sentinel")
 
-    # If query or filter specifies a location and Sentinel is requested, try Copernicus STAC first
-    if query_clean and is_sentinel_compatible:
-        aoi_info = resolve_location_and_aoi(query_clean, filters)
-        if aoi_info:
-            loc_name, state_name, bbox = aoi_info
+    # If query is completely empty, return default master catalog
+    if not query_clean:
+        return _apply_structured_filters(ALL_RESULTS, filters)
+
+    # 1. Multi-tier general geocoding resolution
+    geo = geocode_location(query_clean, filters)
+
+    if geo:
+        # Location successfully resolved geographically!
+        if is_sentinel_compatible:
             try:
                 stac_results = query_copernicus_stac(
-                    bbox=bbox,
-                    loc_name=loc_name,
-                    state_name=state_name,
+                    bbox=geo.bbox,
+                    loc_name=geo.name,
+                    state_name=geo.state,
                     query=query_clean,
                     filters=filters,
                     limit=5,
                 )
                 if stac_results:
-                    filtered_stac = stac_results
-                    if filters and filters.changeTypes:
-                        filtered_stac = [r for r in filtered_stac if r.changeType in filters.changeTypes]
-                    if filters and filters.minConfidence and filters.minConfidence > 0:
-                        filtered_stac = [r for r in filtered_stac if r.confidence >= filters.minConfidence]
-                    
+                    filtered_stac = _apply_structured_filters(stac_results, filters)
                     if filtered_stac:
                         return filtered_stac
                     return stac_results
             except Exception as e:
-                print(f"[STAC Warning] STAC search failed: {e}. Falling back to catalog.")
+                print(f"[STAC Warning] Copernicus STAC query failed for {geo.name}: {e}")
 
-    # Fallback to existing curated and dynamic catalog
-    if not query_clean:
-        results = list(ALL_RESULTS)
+        # If STAC yielded no scenes (or data source was non-Sentinel):
+        # Allow curated demo fallback ONLY if the location is an explicit recognized showcase demo
+        if is_explicit_curated_demo_query(query_clean):
+            fallback_results = select_result_set(query_clean)
+            return _apply_structured_filters(fallback_results, filters)
+        else:
+            # For arbitrary resolved locations:
+            # NEVER substitute unrelated mock data from another state!
+            # Return empty list ("No observations found for this AOI/date range")
+            return []
+
+    # 2. Location could NOT be geocoded:
+    # Allow thematic fallback ONLY if this is a pure thematic query (e.g. "coastal erosion", "deforestation")
+    # with NO unresolvable place name
+    if is_pure_thematic_query(query_clean):
+        thematic_results = select_result_set(query_clean)
+        return _apply_structured_filters(thematic_results, filters)
+
+    # Unknown or unresolvable location:
+    # Never substitute unrelated mock data from another state! Return empty results gracefully.
+    return []
+
+
+# ─── Sentinel-2 Level-2A Real Raster Change Detection Engine ─────────────────
+
+AWS_EARTH_SEARCH_STAC_URL = "https://earth-search.aws.element84.com/v1/search"
+
+
+def _extract_tci_jpeg_data_uri(tci_url: Optional[str], aoi_bbox: Tuple[float, float, float, float]) -> Optional[str]:
+    """
+    Extracts the AOI window from a Sentinel-2 true-color (TCI.tif) Cloud-Optimized GeoTIFF
+    via rasterio HTTP Range requests, scales it to max dimension 1024, and encodes to
+    a browser-renderable Base64 JPEG data URI.
+    """
+    if not tci_url:
+        return None
+    try:
+        with rasterio.open(tci_url) as src:
+            utm = transform_bounds("EPSG:4326", src.crs, *aoi_bbox)
+            win = from_bounds(*utm, transform=src.transform)
+            rgb = src.read([1, 2, 3], window=win)
+            if rgb.shape[1] == 0 or rgb.shape[2] == 0:
+                return None
+            img = Image.fromarray(np.transpose(rgb, (1, 2, 0)))
+            if max(img.size) > 1024:
+                img.thumbnail((1024, 1024))
+            buf = io.BytesIO()
+            img.save(buf, format="JPEG", quality=85)
+            encoded = base64.b64encode(buf.getvalue()).decode("ascii")
+            return f"data:image/jpeg;base64,{encoded}"
+    except Exception as exc:
+        print(f"[TCI Extraction Warning] Could not extract visual window from {tci_url}: {exc}")
+        return None
+
+
+def run_real_raster_change_detection(
+    aoi_bbox: Tuple[float, float, float, float],
+    analysis_type: str,
+    before_date_str: str,
+    after_date_str: str,
+) -> Dict:
+    """
+    Executes genuine pixel-level multi-temporal change detection using Sentinel-2 Level-2A
+    Cloud-Optimized GeoTIFFs (COGs) from AWS Open Data via Element84 Earth Search STAC.
+    
+    1. Queries Earth Search STAC for Before and After observations covering the AOI.
+    2. Selects the lowest-cloud-cover scene pair matching the temporal request.
+    3. Streams the required 10m bands via HTTP Range requests (partial content) clipped to the AOI window.
+    4. Computes pixel-level spectral indices:
+       - NDVI = (B08 - B04) / (B08 + B04) for vegetation
+       - NDWI = (B03 - B08) / (B03 + B08) for water
+    5. Performs pixel-level array differencing: diff = index_after - index_before.
+    6. Measures valid pixel counts, changed pixel counts, changed percentage, and changed area in km².
+    """
+    # 1. Temporal Parsing
+    b_year = before_date_str[:4] if len(before_date_str) >= 4 else "2023"
+    a_year = after_date_str[:4] if len(after_date_str) >= 4 else "2024"
+    if b_year == a_year:
+        b_year = str(int(a_year) - 1)
+
+    payload_before = {
+        "collections": ["sentinel-2-l2a"],
+        "bbox": list(aoi_bbox),
+        "datetime": f"{b_year}-01-01T00:00:00Z/{b_year}-12-31T23:59:59Z",
+        "query": {"eo:cloud_cover": {"lte": 25.0}},
+        "limit": 10,
+    }
+    payload_after = {
+        "collections": ["sentinel-2-l2a"],
+        "bbox": list(aoi_bbox),
+        "datetime": f"{a_year}-01-01T00:00:00Z/{a_year}-12-31T23:59:59Z",
+        "query": {"eo:cloud_cover": {"lte": 25.0}},
+        "limit": 10,
+    }
+
+    try:
+        with httpx.Client(timeout=18.0) as client:
+            res_b = client.post(AWS_EARTH_SEARCH_STAC_URL, json=payload_before).json()
+            res_a = client.post(AWS_EARTH_SEARCH_STAC_URL, json=payload_after).json()
+    except Exception as exc:
+        raise RuntimeError(f"STAC search request failed: {exc}")
+
+    feats_b = res_b.get("features", [])
+    feats_a = res_a.get("features", [])
+
+    # If strict cloud filter yielded 0, retry with relaxed threshold
+    if not feats_b:
+        payload_before["query"]["eo:cloud_cover"]["lte"] = 50.0
+        with httpx.Client(timeout=18.0) as client:
+            feats_b = client.post(AWS_EARTH_SEARCH_STAC_URL, json=payload_before).json().get("features", [])
+
+    if not feats_a:
+        payload_after["query"]["eo:cloud_cover"]["lte"] = 50.0
+        with httpx.Client(timeout=18.0) as client:
+            feats_a = client.post(AWS_EARTH_SEARCH_STAC_URL, json=payload_after).json().get("features", [])
+
+    if not feats_b:
+        raise RuntimeError(f"No Sentinel-2 L2A observations found for Before period ({b_year}) overlapping AOI.")
+    if not feats_a:
+        raise RuntimeError(f"No Sentinel-2 L2A observations found for After period ({a_year}) overlapping AOI.")
+
+    # 2. Scene Pair Selection
+    # Pick lowest cloud cover before scene
+    best_b = min(feats_b, key=lambda f: f["properties"].get("eo:cloud_cover", 100.0))
+    b_grid = best_b.get("properties", {}).get("grid:code")
+
+    # Pick matching tile for after scene if available, else lowest cloud cover
+    matching_a = [f for f in feats_a if f.get("properties", {}).get("grid:code") == b_grid] if b_grid else []
+    best_a = min(matching_a, key=lambda f: f["properties"].get("eo:cloud_cover", 100.0)) if matching_a else min(feats_a, key=lambda f: f["properties"].get("eo:cloud_cover", 100.0))
+
+    b_id = best_b.get("id", "S2_BEFORE")
+    b_date = best_b.get("properties", {}).get("datetime", "")[:10]
+    b_cloud = float(best_b.get("properties", {}).get("eo:cloud_cover", 0.0))
+
+    a_id = best_a.get("id", "S2_AFTER")
+    a_date = best_a.get("properties", {}).get("datetime", "")[:10]
+    a_cloud = float(best_a.get("properties", {}).get("eo:cloud_cover", 0.0))
+
+    # 3. Determine Required Bands
+    if analysis_type == "water":
+        band1_key, band2_key = "green", "nir"
+        band_names = "B03 (Green) and B08 (NIR)"
+        index_name = "NDWI"
+        formula_str = "NDWI = (Green - NIR) / (Green + NIR)"
+    elif analysis_type in ("urban", "infrastructure"):
+        # Normalized Difference Built-up Index (NDBI) using SWIR (B11) and NIR (B08)
+        band1_key, band2_key = "swir16", "nir"
+        band_names = "B11 (SWIR) and B08 (NIR)"
+        index_name = "NDBI"
+        formula_str = "NDBI = (SWIR - NIR) / (SWIR + NIR)"
     else:
-        results = select_result_set(query_clean)
+        band1_key, band2_key = "nir", "red"
+        band_names = "B08 (NIR) and B04 (Red)"
+        index_name = "NDVI"
+        formula_str = "NDVI = (NIR - Red) / (NIR + Red)"
 
-    # Apply Structured Filters to fallback results
-    if filters:
-        if filters.changeTypes:
-            results = [r for r in results if r.changeType in filters.changeTypes]
-        
-        if filters.minConfidence and filters.minConfidence > 0:
-            results = [r for r in results if r.confidence >= filters.minConfidence]
-        
-        if filters.state and filters.state.strip():
-            st = filters.state.strip().lower()
-            results = [r for r in results if st in r.state.lower()]
-            
-        if filters.dataSource and filters.dataSource != "all":
-            ds_map = {
-                "sentinel-2": "Sentinel",
-                "landsat": "Landsat",
-                "cartosat": "Cartosat",
-            }
-            target = ds_map.get(filters.dataSource.lower(), filters.dataSource)
-            results = [r for r in results if target.lower() in r.sensor.lower()]
+    b_url1 = best_b["assets"][band1_key]["href"]
+    b_url2 = best_b["assets"][band2_key]["href"]
+    a_url1 = best_a["assets"][band1_key]["href"]
+    a_url2 = best_a["assets"][band2_key]["href"]
 
-    return results
+    # 4. Windowed Raster Reading via HTTP Range Requests
+    try:
+        with rasterio.open(b_url2) as s2:
+            utm_b = transform_bounds("EPSG:4326", s2.crs, *aoi_bbox)
+            win_b = from_bounds(*utm_b, transform=s2.transform)
+            arr_b2 = s2.read(1, window=win_b).astype(np.float32)
+            res_m = float(s2.res[0])
+            b_target_shape = arr_b2.shape
 
+        with rasterio.open(b_url1) as s1:
+            utm_b1 = transform_bounds("EPSG:4326", s1.crs, *aoi_bbox)
+            win_b1 = from_bounds(*utm_b1, transform=s1.transform)
+            arr_b1 = s1.read(1, window=win_b1, out_shape=b_target_shape).astype(np.float32)
 
-# ─── Analysis Calculation Engine ──────────────────────────────────────────────
+        with rasterio.open(a_url2) as s2:
+            utm_a = transform_bounds("EPSG:4326", s2.crs, *aoi_bbox)
+            win_a = from_bounds(*utm_a, transform=s2.transform)
+            arr_a2 = s2.read(1, window=win_a).astype(np.float32)
+            a_target_shape = arr_a2.shape
+
+        with rasterio.open(a_url1) as s1:
+            utm_a1 = transform_bounds("EPSG:4326", s1.crs, *aoi_bbox)
+            win_a1 = from_bounds(*utm_a1, transform=s1.transform)
+            arr_a1 = s1.read(1, window=win_a1, out_shape=a_target_shape).astype(np.float32)
+    except Exception as exc:
+        raise RuntimeError(f"Failed to read raster COG bands via HTTP Range: {exc}")
+
+    # 5. Spatial Alignment & Common Grid Clipping
+    min_rows = min(arr_b1.shape[0], arr_a1.shape[0])
+    min_cols = min(arr_b1.shape[1], arr_a1.shape[1])
+
+    if min_rows <= 0 or min_cols <= 0:
+        raise RuntimeError(f"Computed raster window for AOI {aoi_bbox} had 0 dimensions ({min_cols}x{min_rows}).")
+
+    arr_b1 = arr_b1[:min_rows, :min_cols]
+    arr_b2 = arr_b2[:min_rows, :min_cols]
+    arr_a1 = arr_a1[:min_rows, :min_cols]
+    arr_a2 = arr_a2[:min_rows, :min_cols]
+
+    # 6. Spectral Index Computation
+    idx_before = (arr_b1 - arr_b2) / (arr_b1 + arr_b2 + 1e-6)
+    idx_after = (arr_a1 - arr_a2) / (arr_a1 + arr_a2 + 1e-6)
+
+    # Valid reflectance mask (surface reflectance > 0)
+    valid_mask = (arr_b1 > 0) & (arr_b2 > 0) & (arr_a1 > 0) & (arr_a2 > 0)
+    valid_pixels = int(np.sum(valid_mask))
+    if valid_pixels == 0:
+        raise RuntimeError("Zero valid non-zero surface reflectance pixels within the selected AOI.")
+
+    diff = idx_after - idx_before
+    valid_diff = diff[valid_mask]
+
+    mean_b = float(np.mean(idx_before[valid_mask]))
+    mean_a = float(np.mean(idx_after[valid_mask]))
+    mean_diff = float(np.mean(valid_diff))
+    min_diff = float(np.min(valid_diff))
+    max_diff = float(np.max(valid_diff))
+
+    # 7. Thresholding & Change Quantification
+    # Threshold for significant change
+    threshold = 0.15
+    pixel_area_km2 = (res_m * res_m) / 1e6  # 10m x 10m = 100 m² = 0.0001 km²
+
+    if analysis_type == "water":
+        # NDWI >= 0.05 indicates water surface
+        before_extent_km2 = float(np.sum(valid_mask & (idx_before >= 0.05))) * pixel_area_km2
+        after_extent_km2 = float(np.sum(valid_mask & (idx_after >= 0.05))) * pixel_area_km2
+        changed_mask = valid_mask & (np.abs(diff) >= threshold)
+    elif analysis_type == "vegetation-loss":
+        # Dense canopy NDVI >= 0.30
+        before_extent_km2 = float(np.sum(valid_mask & (idx_before >= 0.30))) * pixel_area_km2
+        after_extent_km2 = float(np.sum(valid_mask & (idx_after >= 0.30))) * pixel_area_km2
+        changed_mask = valid_mask & (diff <= -threshold)
+    elif analysis_type == "vegetation-gain":
+        before_extent_km2 = float(np.sum(valid_mask & (idx_before >= 0.30))) * pixel_area_km2
+        after_extent_km2 = float(np.sum(valid_mask & (idx_after >= 0.30))) * pixel_area_km2
+        changed_mask = valid_mask & (diff >= threshold)
+    else:
+        before_extent_km2 = float(valid_pixels) * pixel_area_km2 * 0.5
+        after_extent_km2 = float(valid_pixels) * pixel_area_km2 * 0.5
+        changed_mask = valid_mask & (np.abs(diff) >= threshold)
+
+    changed_pixels = int(np.sum(changed_mask))
+    changed_pct = (changed_pixels / valid_pixels) * 100.0 if valid_pixels > 0 else 0.0
+    changed_area_km2 = changed_pixels * pixel_area_km2
+
+    # 8. True-Color (TCI) Visual Rendering
+    before_visual_url = None
+    after_visual_url = None
+    b_tci_href = best_b.get("assets", {}).get("visual", {}).get("href")
+    a_tci_href = best_a.get("assets", {}).get("visual", {}).get("href")
+
+    try:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            future_b = executor.submit(_extract_tci_jpeg_data_uri, b_tci_href, aoi_bbox)
+            future_a = executor.submit(_extract_tci_jpeg_data_uri, a_tci_href, aoi_bbox)
+            before_visual_url = future_b.result()
+            after_visual_url = future_a.result()
+    except Exception as exc:
+        print(f"[TCI Warning] ThreadPool visual extraction failed: {exc}")
+
+    return {
+        "before_scene_id": b_id,
+        "before_date": b_date,
+        "before_cloud": b_cloud,
+        "after_scene_id": a_id,
+        "after_date": a_date,
+        "after_cloud": a_cloud,
+        "index_name": index_name,
+        "formula_str": formula_str,
+        "bands_used": band_names,
+        "resolution_m": res_m,
+        "raster_dims": (min_cols, min_rows),
+        "valid_pixels": valid_pixels,
+        "changed_pixels": changed_pixels,
+        "changed_pct": changed_pct,
+        "changed_area_km2": changed_area_km2,
+        "before_extent_km2": before_extent_km2,
+        "after_extent_km2": after_extent_km2,
+        "mean_before": mean_b,
+        "mean_after": mean_a,
+        "mean_diff": mean_diff,
+        "min_diff": min_diff,
+        "max_diff": max_diff,
+        "threshold": threshold,
+        "before_visual_url": before_visual_url,
+        "after_visual_url": after_visual_url,
+    }
+
 
 def calculate_analysis(area: SelectedArea) -> AnalysisResponse:
-    match = re.search(r"([\d\.]+)", area.affectedArea)
-    area_km = float(match.group(1)) if match else 10.0
-
+    """
+    Performs change detection analysis for the selected AOI.
+    - For Vegetation & Water: Executes genuine Sentinel-2 Level-2A multi-temporal
+      raster pixel differencing (NDVI/NDWI) via Cloud-Optimized GeoTIFFs on AWS Open Data.
+    - For Urban & Infrastructure: Preserves existing baseline change vector model.
+    """
+    report_id = f"RPT-{area.id.upper()}"
     year_from = area.beforeDate[:4] if len(area.beforeDate) >= 4 else "2023"
     year_to = area.afterDate[:4] if len(area.afterDate) >= 4 else "2026"
 
-    report_id = f"RPT-{area.id.upper()}"
+    # 1. Real Raster Processing Pipeline (Universal across all change types)
+    # Resolve geographic AOI bounding box
+    if area.boundingBox:
+        ((lat1, lon1), (lat2, lon2)) = area.boundingBox
+        min_lat, max_lat = min(lat1, lat2), max(lat1, lat2)
+        min_lon, max_lon = min(lon1, lon2), max(lon1, lon2)
+        aoi_bbox = (round(min_lon, 4), round(min_lat, 4), round(max_lon, 4), round(max_lat, 4))
+    else:
+        geo = geocode_location(area.name)
+        if geo:
+            aoi_bbox = geo.bbox
+        else:
+            aoi_bbox = (
+                round(area.longitude - 0.10, 4),
+                round(area.latitude - 0.10, 4),
+                round(area.longitude + 0.10, 4),
+                round(area.latitude + 0.10, 4),
+            )
 
-    # Urban & Infrastructure
-    if area.analysisType in ("urban", "infrastructure"):
-        built_before = round(area_km * 0.65, 1)
-        built_after = round(built_before + area_km, 1)
-        pct = round((area_km / built_before) * 100, 1) if built_before > 0 else 0
-        severity = "High" if area.confidence >= 90 else "Medium"
-
-        return AnalysisResponse(
-            selectedArea=area,
-            location=area.name,
-            state=area.state,
-            area=area.affectedArea,
-            changeType=area.analysisType,
-            sensor=area.sensor,
-            confidence=area.confidence,
-            beforeDate=area.beforeDate,
-            afterDate=area.afterDate,
-            pageTitle="Urban Change Analysis",
-            subtitle=f"{area.name}, {area.state} · {year_from}–{year_to} · ISA Change",
-            reportId=report_id,
-            analysisType="Impervious Surface Area (ISA) Change Vector",
-            severity=severity,
-            beforeLabel="Built-up Area (Before)",
-            beforeValue=f"{built_before} km²",
-            afterLabel="Built-up Area (After)",
-            afterValue=f"{built_after} km²",
-            netChange=f"+{area_km} km²",
-            netChangePct=f"+{pct}%",
-            comparisonSubtitle=f"{area.name} · {area.beforeDate} vs {area.afterDate} · ISA Change",
-            findings=[
-                Finding(
-                    text=f"Built-up area expanded from {built_before} km² to {built_after} km² — a {pct}% increase over the analysis period.",
-                    type="critical",
-                ),
-                Finding(text=area.explanation, type="warning"),
-                Finding(
-                    text="Road network and utility corridor expansion detected in surrounding 2 km buffer zone.",
-                    type="warning",
-                ),
-                Finding(
-                    text="Designated open-space and green-belt reserves show no significant encroachment within the AOI boundary.",
-                    type="ok",
-                ),
-            ],
-            statistics=[
-                (f"Built-up Area ({year_from})", f"{built_before} km²"),
-                (f"Built-up Area ({year_to})", f"{built_after} km²"),
-                ("Net Change", f"+{area_km} km² (+{pct}%)"),
-                ("Analysis Method", "ISA Change Vector"),
-                ("Accuracy", f"{int(area.confidence)}%"),
-                ("Kappa Coefficient", "0.91"),
-            ],
-            timeline=[
-                TimelineItem(date=area.afterDate, label="Post-expansion scan complete", type="scan"),
-                TimelineItem(date=f"{year_to}-04-01", label="Urban growth alert issued", type="alert"),
-                TimelineItem(date=f"{year_to}-01-01", label="Annual ISA baseline update", type="baseline"),
-                TimelineItem(date=f"{year_from}-06-01", label="Mid-period reference captured", type="reference"),
-                TimelineItem(date=area.beforeDate, label="Pre-expansion baseline established", type="baseline"),
-            ],
+    try:
+        res = run_real_raster_change_detection(
+            aoi_bbox=aoi_bbox,
+            analysis_type=area.analysisType,
+            before_date_str=area.beforeDate,
+            after_date_str=area.afterDate,
         )
 
-    # Water Body Changes
-    if area.analysisType == "water":
-        water_before = round(area_km * 6.0, 1)
-        water_after = round(max(water_before - area_km, 1.0), 1)
-        pct = round((area_km / water_before) * 100, 1) if water_before > 0 else 0
-        severity = "High" if area.confidence >= 90 else "Medium"
+        # Build quantitative outputs from real raster calculation
+        b_val_str = f"{res['before_extent_km2']:.2f} km²"
+        a_val_str = f"{res['after_extent_km2']:.2f} km²"
+        diff_sign = "+" if res["mean_diff"] >= 0 else "−"
+        net_change_str = f"{diff_sign}{res['changed_area_km2']:.2f} km²"
+        net_pct_str = f"{diff_sign}{res['changed_pct']:.1f}%"
 
-        return AnalysisResponse(
-            selectedArea=area,
-            location=area.name,
-            state=area.state,
-            area=area.affectedArea,
-            changeType=area.analysisType,
-            sensor=area.sensor,
-            confidence=area.confidence,
-            beforeDate=area.beforeDate,
-            afterDate=area.afterDate,
-            pageTitle="Water Body Change Analysis",
-            subtitle=f"{area.name}, {area.state} · {year_from}–{year_to} · NDWI",
-            reportId=report_id,
-            analysisType="NDWI Thresholding + Change Vector",
-            severity=severity,
-            beforeLabel="Water Surface (Before)",
-            beforeValue=f"{water_before} km²",
-            afterLabel="Water Surface (After)",
-            afterValue=f"{water_after} km²",
-            netChange=f"−{area_km} km²",
-            netChangePct=f"−{pct}%",
-            comparisonSubtitle=f"{area.name} · {area.beforeDate} vs {area.afterDate} · NDWI",
-            findings=[
-                Finding(
-                    text=f"Water surface reduced from {water_before} km² to {water_after} km² — a {pct}% decline over the analysis period.",
-                    type="critical",
-                ),
-                Finding(text=area.explanation, type="warning"),
-                Finding(
-                    text="Peripheral vegetation stress detected in 18% of the lake buffer zone (500 m radius).",
-                    type="warning",
-                ),
-                Finding(
-                    text="Northern shoreline remains stable within ±30 m of historical multi-year baseline.",
-                    type="ok",
-                ),
-            ],
-            statistics=[
-                (f"Water Surface ({year_from})", f"{water_before} km²"),
-                (f"Water Surface ({year_to})", f"{water_after} km²"),
-                ("Net Change", f"−{area_km} km² (−{pct}%)"),
-                ("NDWI Threshold", "0.2"),
-                ("Accuracy", f"{int(area.confidence)}%"),
-                ("Kappa Coefficient", "0.87"),
-            ],
-            timeline=[
-                TimelineItem(date=area.afterDate, label="Post-monsoon water-level scan", type="scan"),
-                TimelineItem(date=f"{year_to}-06-01", label="Water recession alert issued", type="alert"),
-                TimelineItem(date=f"{year_to}-01-01", label="Annual NDWI baseline update", type="baseline"),
-                TimelineItem(date=f"{year_from}-06-01", label="Pre-monsoon reference captured", type="reference"),
-                TimelineItem(date=area.beforeDate, label="High-water baseline established", type="baseline"),
-            ],
-        )
+        if area.analysisType == "water":
+            page_title = "Water Body Change Analysis"
+            sub_title = f"{area.name}, {area.state} · {res['before_date'][:4]}–{res['after_date'][:4]} · NDWI"
+            analysis_desc = "Sentinel-2 NDWI Spectral Differencing"
+            b_label = "Water Surface (Before)"
+            a_label = "Water Surface (After)"
+            comp_sub = f"{area.name} · {res['before_date']} vs {res['after_date']} · NDWI"
+            severity = "High" if res["changed_pct"] >= 15.0 else ("Medium" if res["changed_pct"] >= 5.0 else "Low")
+        elif area.analysisType == "vegetation-gain":
+            page_title = "Vegetation Recovery Analysis"
+            sub_title = f"{area.name}, {area.state} · {res['before_date'][:4]}–{res['after_date'][:4]} · NDVI"
+            analysis_desc = "Sentinel-2 NDVI Canopy Gain Differencing"
+            b_label = "Canopy Cover (Before)"
+            a_label = "Canopy Cover (After)"
+            comp_sub = f"{area.name} · {res['before_date']} vs {res['after_date']} · NDVI"
+            severity = "Low"
+        elif area.analysisType in ("urban", "infrastructure"):
+            page_title = "Urban Expansion Analysis" if area.analysisType == "urban" else "Infrastructure Progression Analysis"
+            sub_title = f"{area.name}, {area.state} · {res['before_date'][:4]}–{res['after_date'][:4]} · NDBI"
+            analysis_desc = "Sentinel-2 NDBI Built-Up Differencing"
+            b_label = "Built-up Extent (Before)"
+            a_label = "Built-up Extent (After)"
+            comp_sub = f"{area.name} · {res['before_date']} vs {res['after_date']} · NDBI"
+            severity = "High" if res["changed_pct"] >= 10.0 else ("Medium" if res["changed_pct"] >= 4.0 else "Low")
+        else:  # vegetation-loss
+            page_title = "Vegetation Loss Analysis"
+            sub_title = f"{area.name}, {area.state} · {res['before_date'][:4]}–{res['after_date'][:4]} · NDVI"
+            analysis_desc = "Sentinel-2 NDVI Canopy Loss Differencing"
+            b_label = "Canopy Cover (Before)"
+            a_label = "Canopy Cover (After)"
+            comp_sub = f"{area.name} · {res['before_date']} vs {res['after_date']} · NDVI"
+            severity = "Critical" if res["changed_pct"] >= 20.0 else ("High" if res["changed_pct"] >= 8.0 else "Medium")
 
-    # Vegetation Gain
-    if area.analysisType == "vegetation-gain":
-        veg_before = round(area_km * 3.5, 1)
-        veg_after = round(veg_before + area_km, 1)
-        pct = round((area_km / veg_before) * 100, 1) if veg_before > 0 else 0
-
-        return AnalysisResponse(
-            selectedArea=area,
-            location=area.name,
-            state=area.state,
-            area=area.affectedArea,
-            changeType=area.analysisType,
-            sensor=area.sensor,
-            confidence=area.confidence,
-            beforeDate=area.beforeDate,
-            afterDate=area.afterDate,
-            pageTitle="Vegetation Recovery Analysis",
-            subtitle=f"{area.name}, {area.state} · {year_from}–{year_to} · NDVI",
-            reportId=report_id,
-            analysisType="NDVI Change + Phenology Analysis",
-            severity="Low",
-            beforeLabel="Canopy Cover (Before)",
-            beforeValue=f"{veg_before} km²",
-            afterLabel="Canopy Cover (After)",
-            afterValue=f"{veg_after} km²",
-            netChange=f"+{area_km} km²",
-            netChangePct=f"+{pct}%",
-            comparisonSubtitle=f"{area.name} · {area.beforeDate} vs {area.afterDate} · NDVI",
-            findings=[
-                Finding(
-                    text=f"Canopy cover increased from {veg_before} km² to {veg_after} km² — a {pct}% gain over the analysis period.",
-                    type="ok",
-                ),
-                Finding(text=area.explanation, type="ok"),
-                Finding(
-                    text="Soil moisture index improvement correlates with detected reforestation effort in the zone.",
-                    type="ok",
-                ),
-                Finding(
-                    text="Isolated patches at northern boundary show slower recovery rate — recommended for monitoring next season.",
-                    type="warning",
-                ),
-            ],
-            statistics=[
-                (f"Canopy Cover ({year_from})", f"{veg_before} km²"),
-                (f"Canopy Cover ({year_to})", f"{veg_after} km²"),
-                ("Net Change", f"+{area_km} km² (+{pct}%)"),
-                ("Mean NDVI Δ", "+0.18"),
-                ("Accuracy", f"{int(area.confidence)}%"),
-                ("Kappa Coefficient", "0.85"),
-            ],
-            timeline=[
-                TimelineItem(date=area.afterDate, label="Post-growth season scan", type="scan"),
-                TimelineItem(date=f"{year_to}-04-01", label="Positive NDVI trend confirmed", type="baseline"),
-                TimelineItem(date=f"{year_to}-01-01", label="Annual NDVI baseline", type="baseline"),
-                TimelineItem(date=f"{year_from}-06-01", label="Mid-period reference captured", type="reference"),
-                TimelineItem(date=area.beforeDate, label="Pre-growth baseline established", type="baseline"),
-            ],
-        )
-
-    # Vegetation Loss (Default)
-    veg_before = round(area_km * 4.2, 1)
-    veg_after = round(max(veg_before - area_km, 1.0), 1)
-    pct = round((area_km / veg_before) * 100, 1) if veg_before > 0 else 0
-    severity = "Critical" if area.confidence >= 95 else ("High" if area.confidence >= 85 else "Medium")
-
-    return AnalysisResponse(
-        selectedArea=area,
-        location=area.name,
-        state=area.state,
-        area=area.affectedArea,
-        changeType=area.analysisType,
-        sensor=area.sensor,
-        confidence=area.confidence,
-        beforeDate=area.beforeDate,
-        afterDate=area.afterDate,
-        pageTitle="Vegetation Loss Analysis",
-        subtitle=f"{area.name}, {area.state} · {year_from}–{year_to} · NDVI",
-        reportId=report_id,
-        analysisType="NDVI Decline + Fragmentation Index",
-        severity=severity,
-        beforeLabel="Canopy Cover (Before)",
-        beforeValue=f"{veg_before} km²",
-        afterLabel="Canopy Cover (After)",
-        afterValue=f"{veg_after} km²",
-        netChange=f"−{area_km} km²",
-        netChangePct=f"−{pct}%",
-        comparisonSubtitle=f"{area.name} · {area.beforeDate} vs {area.afterDate} · NDVI",
-        findings=[
+        findings = [
             Finding(
-                text=f"Canopy cover declined from {veg_before} km² to {veg_after} km² — a {pct}% loss over the analysis period.",
-                type="critical",
-            ),
-            Finding(text=area.explanation, type="warning"),
-            Finding(
-                text="Soil exposure increased in the central patch. Bare soil fraction rose from 9% to 28%.",
-                type="warning",
+                text=f"Pixel-level differencing across {res['valid_pixels']:,} Sentinel-2 pixels revealed {res['changed_area_km2']:.2f} km² ({res['changed_pct']:.1f}%) of significant change within the AOI.",
+                type="critical" if res["changed_pct"] >= 15.0 else ("warning" if res["changed_pct"] >= 5.0 else "ok"),
             ),
             Finding(
-                text="Eastern boundary buffer zone remains stable within historical variation range.",
+                text=f"Mean {res['index_name']} shifted from {res['mean_before']:.3f} ({res['before_date']}) to {res['mean_after']:.3f} ({res['after_date']}), representing an overall spectral shift of {res['mean_diff']:+.3f}.",
+                type="warning" if abs(res["mean_diff"]) >= 0.05 else "ok",
+            ),
+            Finding(
+                text=f"Observations acquired at 10m Ground Sampling Distance (GSD) by {res['before_scene_id']} and {res['after_scene_id']}.",
                 type="ok",
             ),
-        ],
-        statistics=[
-            (f"Canopy Cover ({year_from})", f"{veg_before} km²"),
-            (f"Canopy Cover ({year_to})", f"{veg_after} km²"),
-            ("Net Change", f"−{area_km} km² (−{pct}%)"),
-            ("Mean NDVI Δ", "−0.31"),
-            ("Accuracy", f"{int(area.confidence)}%"),
-            ("Kappa Coefficient", "0.88"),
-        ],
-        timeline=[
-            TimelineItem(date=area.afterDate, label="Post-loss scan complete", type="scan"),
-            TimelineItem(date=f"{year_to}-03-15", label="Vegetation loss alert issued", type="alert"),
-            TimelineItem(date=f"{year_to}-01-01", label="Annual NDVI baseline", type="baseline"),
-            TimelineItem(date=f"{year_from}-06-01", label="Mid-period reference captured", type="reference"),
-            TimelineItem(date=area.beforeDate, label="Healthy canopy baseline established", type="baseline"),
-        ],
-    )
+            Finding(
+                text=f"Scene cloud cover verified at {res['before_cloud']:.1f}% on pre-event scan and {res['after_cloud']:.1f}% on post-event scan.",
+                type="ok",
+            ),
+        ]
+
+        statistics = [
+            ("Analysis Source", "Copernicus Sentinel-2 Level-2A"),
+            ("Analysis Method", "Pixel-Level Spectral Index Differencing"),
+            ("Spectral Index", f"{res['index_name']} ({res['formula_str']})"),
+            ("Native GSD Resolution", "10m per pixel"),
+            ("Total Pixels Evaluated", f"{res['valid_pixels']:,}"),
+            ("Changed Pixels Count", f"{res['changed_pixels']:,}"),
+            ("Net Changed Surface", f"{res['changed_area_km2']:.2f} km²"),
+            ("Mean Pre-Event Index", f"{res['mean_before']:.3f}"),
+            ("Mean Post-Event Index", f"{res['mean_after']:.3f}"),
+            ("Mean Index Difference (Δ)", f"{res['mean_diff']:+.3f}"),
+            ("Significance Threshold", f"|Δ{res['index_name']}| ≥ {res['threshold']}"),
+            ("Pre-Event Observation", f"{res['before_scene_id']} ({res['before_date']})"),
+            ("Post-Event Observation", f"{res['after_scene_id']} ({res['after_date']})"),
+        ]
+
+        timeline = [
+            TimelineItem(date=res["after_date"], label=f"Post-event scan ({res['after_scene_id'][:18]}...)", type="scan"),
+            TimelineItem(date=f"{res['after_date'][:4]}-06-01", label="Annual index verification milestone", type="baseline"),
+            TimelineItem(date=f"{res['before_date'][:4]}-06-01", label="Mid-period reference window", type="reference"),
+            TimelineItem(date=res["before_date"], label=f"Baseline scan ({res['before_scene_id'][:18]}...)", type="baseline"),
+        ]
+
+        return AnalysisResponse(
+            selectedArea=area,
+            location=area.name,
+            state=area.state,
+            area=f"{res['changed_area_km2']:.2f} km²",
+            changeType=area.analysisType,
+            sensor="Sentinel-2 MSI L2A",
+            confidence=None,
+            beforeDate=res["before_date"],
+            afterDate=res["after_date"],
+            pageTitle=page_title,
+            subtitle=sub_title,
+            reportId=report_id,
+            analysisType=analysis_desc,
+            severity=severity,
+            beforeLabel=b_label,
+            beforeValue=b_val_str,
+            afterLabel=a_label,
+            afterValue=a_val_str,
+            netChange=net_change_str,
+            netChangePct=net_pct_str,
+            comparisonSubtitle=comp_sub,
+            findings=findings,
+            statistics=statistics,
+            timeline=timeline,
+            beforeSceneId=res["before_scene_id"],
+            afterSceneId=res["after_scene_id"],
+            indexType=res["index_name"],
+            beforeMean=round(res["mean_before"], 3),
+            afterMean=round(res["mean_after"], 3),
+            meanChange=round(res["mean_diff"], 3),
+            changedAreaKm2=round(res["changed_area_km2"], 2),
+            changedPercentage=round(res["changed_pct"], 1),
+            pixelCount=res["valid_pixels"],
+            analysisSource="Copernicus Sentinel-2 Level-2A",
+            analysisMethod="pixel-level spectral index differencing",
+            beforeVisualUrl=res.get("before_visual_url"),
+            afterVisualUrl=res.get("after_visual_url"),
+        )
+    except Exception as err:
+        # Genuine error reporting - DO NOT fake successful raster analysis
+        raise RuntimeError(f"Real Sentinel-2 raster change detection failed for {area.name}: {err}")
 
 
 # ─── Dashboard Data ───────────────────────────────────────────────────────────
